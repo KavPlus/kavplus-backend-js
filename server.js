@@ -1,437 +1,186 @@
-// server.js (KavPlus Backend) — ESM, Node 18+
+// server.js
+// Node 18+, package.json "type": "module"
 
-import express from "express";
-import cors from "cors";
-import dotenv from "dotenv";
+import express from 'express';
+import cors from 'cors';
+import dotenv from 'dotenv';
+
 dotenv.config();
 
 const app = express();
-app.use(express.json({ limit: "2mb" }));
 
-/* -------------------- CORS (lock to your domains) -------------------- */
-const allowlist = [
-  process.env.APP_BASE_URL || "https://app.kavplus.uk",
-  process.env.API_BASE_URL || "https://api.kavplus.uk",
-  "https://kavplus.uk",
-  "https://www.kavplus.uk",
-  "http://localhost:3000", // optional for local dev
-  "http://localhost:5173", // optional for Vite dev
+// ---------- Config ----------
+const PORT = process.env.PORT || 3000;
+const API_BASE_URL = (process.env.API_BASE_URL || '').replace(/\/$/, '');
+const APP_BASE_URL = (process.env.APP_BASE_URL || '').replace(/\/$/, '');
+
+// AI providers (optional)
+const OPENAI_API_KEY      = process.env.OPENAI_API_KEY || '';
+const OPENAI_BASE_URL     = process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1';
+const OPENAI_MODEL        = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+
+// Amazon LWA (optional for connect buttons)
+const LWA_CLIENT_ID       = process.env.LWA_CLIENT_ID || process.env.ADS_LWA_CLIENT_ID || '';
+const LWA_REDIRECT_SPAPI  = `${APP_BASE_URL || 'https://app.kavplus.uk'}/api/connect/spapi/callback`;
+const LWA_REDIRECT_ADS    = `${APP_BASE_URL || 'https://app.kavplus.uk'}/api/connect/ads/callback`;
+
+// ---------- Middleware ----------
+app.use(express.json({ limit: '1mb' }));
+
+// Allow your front-ends
+const allowed = [
+  'https://kavplus.uk',
+  'https://app.kavplus.uk'
 ].filter(Boolean);
 
-app.use(
-  cors({
-    origin(origin, cb) {
-      if (!origin || allowlist.includes(origin)) return cb(null, true);
-      return cb(new Error("CORS blocked: " + origin));
-    },
-    credentials: true,
-  })
-);
+app.use(cors({
+  origin: (origin, cb) => {
+    // allow same-origin or server-to-server
+    if (!origin || allowed.includes(origin)) return cb(null, true);
+    return cb(new Error('Not allowed by CORS'), false);
+  },
+  optionsSuccessStatus: 200
+}));
 
-/* -------------------- Basics -------------------- */
-app.get("/", (_req, res) => {
-  res.send("KavPlus Backend Running 🚀");
+// ---------- Health ----------
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', uptime: process.uptime(), ts: new Date().toISOString() });
 });
 
-app.get("/health", (_req, res) => {
-  res.json({ status: "ok", uptime: process.uptime(), ts: new Date().toISOString() });
-});
-
-/* -------------------- In-memory store (replace with DB later) -------------------- */
-const TOKENS = {
-  spapi: null, // { refresh_token, region, saved_at }
-  ads: null,   // { refresh_token, api_base, saved_at }
-};
-
-/* -------------------- Admin status (for dashboard) -------------------- */
-app.get("/admin/status", (_req, res) => {
+// ---------- API: status ----------
+app.get('/api/status', (req, res) => {
   res.json({
-    api: { base: process.env.API_BASE_URL || null, ok: true },
-    provider: (process.env.AI_PROVIDER || "auto").toLowerCase(),
-    model: process.env.AI_MODEL || "default",
-    tokens: {
-      spapi: !!TOKENS.spapi?.refresh_token,
-      ads: !!TOKENS.ads?.refresh_token,
+    api: {
+      base: API_BASE_URL || `https://${req.headers.host}`,
+      ok: true
     },
-    timestamp: new Date().toISOString(),
+    provider: {
+      name: OPENAI_API_KEY ? 'openai-compatible' : 'demo',
+      model: OPENAI_MODEL
+    },
+    tokens: {
+      spapi: Boolean(LWA_CLIENT_ID),
+      ads:   Boolean(LWA_CLIENT_ID)
+    },
+    timestamp: new Date().toISOString()
   });
 });
 
-/* ====================================================================
-   ChatKAV+ — universal AI chat with streaming (SSE)
-   Providers: OpenAI, Anthropic, Gemini, AIMLAPI(OpenAI-compatible)
-   ==================================================================== */
-const PROVIDER = (process.env.AI_PROVIDER || "auto").toLowerCase();
-const DEFAULT_MODEL = process.env.AI_MODEL || "gpt-4o-mini";
-
-function pickProvider() {
-  if (PROVIDER !== "auto") return PROVIDER;
-  if (process.env.OPENAI_API_KEY) return "openai";
-  if (process.env.AIMLAPI_API_KEY) return "aimlapi";
-  if (process.env.ANTHROPIC_API_KEY) return "anthropic";
-  if (process.env.GEMINI_API_KEY) return "gemini";
-  return "openai";
-}
-
-/**
- * POST /ai/chat
- * Body: {
- *   messages: [{role:"system"|"user"|"assistant", content:"..."}],
- *   provider?: "auto"|"openai"|"anthropic"|"gemini"|"aimlapi",
- *   model?: string, temperature?: number, max_tokens?: number, system?: string
- * }
- * SSE stream: lines "data: { token: '...' }"
- */
-app.post("/ai/chat", async (req, res) => {
+// ---------- API: chat (ChatKAV+) ----------
+app.post('/api/chat', async (req, res) => {
   try {
-    const chosen = (req.body?.provider || pickProvider()).toLowerCase();
-    const model = req.body?.model || DEFAULT_MODEL;
-    const temperature = typeof req.body?.temperature === "number" ? req.body.temperature : 0.7;
-    const max_tokens = typeof req.body?.max_tokens === "number" ? req.body.max_tokens : 512;
-    const system = req.body?.system || "You are ChatKAV+, a helpful assistant for Amazon sellers.";
-    const messages = Array.isArray(req.body?.messages) ? req.body.messages : [];
+    const { message, system } = req.body || {};
+    const userText = (message || '').toString().trim();
 
-    // SSE headers
-    res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
-    res.setHeader("Cache-Control", "no-cache, no-transform");
-    res.setHeader("Connection", "keep-alive");
-    res.flushHeaders?.();
-
-    const send = (obj) => res.write(`data: ${JSON.stringify(obj)}\n\n`);
-    const end = () => res.end();
-
-    // Normalize (OpenAI style) with system first
-    const normalized = [{ role: "system", content: system }, ...messages];
-
-    // ----- OpenAI & AIMLAPI (OpenAI-compatible streaming) -----
-    if (chosen === "openai" || chosen === "aimlapi") {
-      const base =
-        chosen === "aimlapi"
-          ? process.env.AIMLAPI_BASE?.replace(/\/+$/, "") || "https://api.aimlapi.com/v1"
-          : "https://api.openai.com/v1";
-      const key = chosen === "aimlapi" ? process.env.AIMLAPI_API_KEY : process.env.OPENAI_API_KEY;
-      if (!key) {
-        send({ error: `${chosen.toUpperCase()} key missing` });
-        return end();
-      }
-
-      const r = await fetch(`${base}/chat/completions`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${key}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          model,
-          messages: normalized,
-          temperature,
-          max_tokens,
-          stream: true,
-        }),
-      });
-
-      if (!r.ok || !r.body) {
-        const text = await r.text().catch(() => "");
-        send({ error: `${chosen} error ${r.status}: ${text}` });
-        return end();
-      }
-
-      const reader = r.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
-        for (const line of lines) {
-          const s = line.trim();
-          if (!s.startsWith("data:")) continue;
-          const payload = s.slice(5).trim();
-          if (payload === "[DONE]") {
-            end();
-            return;
-          }
-          try {
-            const json = JSON.parse(payload);
-            const delta = json?.choices?.[0]?.delta?.content;
-            if (delta) send({ token: delta });
-          } catch {
-            /* ignore */
-          }
-        }
-      }
-      end();
-      return;
+    if (!userText) {
+      return res.status(400).json({ ok: false, error: 'Missing "message" in body.' });
     }
 
-    // ----- Anthropic (Claude) streaming -----
-    if (chosen === "anthropic") {
-      const key = process.env.ANTHROPIC_API_KEY;
-      if (!key) {
-        send({ error: "ANTHROPIC_API_KEY missing" });
-        return end();
-      }
-
-      const sys = normalized.find((m) => m.role === "system")?.content;
-      const userMsgs = normalized.filter((m) => m.role !== "system");
-
-      const r = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: {
-          "x-api-key": key,
-          "anthropic-version": "2023-06-01",
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          model: model || "claude-3-5-sonnet-20240620",
-          max_tokens,
-          temperature,
-          system: sys,
-          messages: userMsgs.map((m) => ({ role: m.role, content: m.content })),
-          stream: true,
-        }),
+    // If no key, return a demo reply so the UI works
+    if (!OPENAI_API_KEY) {
+      return res.json({
+        ok: true,
+        provider: 'demo',
+        reply: `👋 Hi from ChatKAV+ demo! You said: "${userText}". Add OPENAI_API_KEY on Render to enable real LLM responses.`
       });
-
-      if (!r.ok || !r.body) {
-        const text = await r.text().catch(() => "");
-        send({ error: `Anthropic error ${r.status}: ${text}` });
-        return end();
-      }
-
-      const reader = r.body.getReader();
-      const decoder = new TextDecoder();
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        const chunk = decoder.decode(value);
-        for (const line of chunk.split("\n")) {
-          try {
-            const evt = JSON.parse(line);
-            const text = evt?.delta?.text || evt?.content_block?.text || "";
-            if (text) send({ token: text });
-          } catch {
-            /* skip non-JSON lines */
-          }
-        }
-      }
-      end();
-      return;
     }
 
-    // ----- Gemini (non-stream fallback) -----
-    if (chosen === "gemini") {
-      const key = process.env.GEMINI_API_KEY;
-      if (!key) {
-        send({ error: "GEMINI_API_KEY missing" });
-        return end();
-      }
-
-      const concat = normalized
-        .filter((m) => m.role !== "system")
-        .map((m) => `${m.role.toUpperCase()}: ${m.content}`)
-        .join("\n");
-
-      const mdl = model || "gemini-1.5-flash";
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
-        mdl
-      )}:generateContent?key=${encodeURIComponent(key)}`;
-
-      const r = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: concat }] }],
-          generationConfig: { temperature, maxOutputTokens: max_tokens },
-        }),
-      });
-
-      if (!r.ok) {
-        const text = await r.text().catch(() => "");
-        send({ error: `Gemini error ${r.status}: ${text}` });
-        return end();
-      }
-      const data = await r.json();
-      const text = data?.candidates?.[0]?.content?.parts?.map((p) => p.text || "").join("") || "";
-      for (const ch of text) send({ token: ch });
-      end();
-      return;
-    }
-
-    send({ error: `Unknown provider: ${chosen}` });
-    end();
-  } catch (e) {
-    console.error(e);
-    res.write(`data: ${JSON.stringify({ error: e.message })}\n\n`);
-    res.end();
-  }
-});
-
-/* ====================================================================
-   Amazon Connect Stubs — SP-API & Ads
-   ==================================================================== */
-function buildLwaAuthUrl({ clientId, redirectUri, scope, state }) {
-  const base = "https://www.amazon.com/ap/oa";
-  const params = new URLSearchParams({
-    client_id: clientId,
-    scope,
-    response_type: "code",
-    redirect_uri: redirectUri,
-    state: state || Math.random().toString(36).slice(2),
-  });
-  return `${base}?${params.toString()}`;
-}
-
-async function exchangeAuthCodeForTokens({ code, clientId, clientSecret, redirectUri }) {
-  const r = await fetch("https://api.amazon.com/auth/o2/token", {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      grant_type: "authorization_code",
-      code,
-      redirect_uri: redirectUri,
-      client_id: clientId,
-      client_secret: clientSecret,
-    }),
-  });
-  if (!r.ok) throw new Error(`LWA token exchange failed: ${r.status} ${await r.text()}`);
-  return r.json(); // { access_token, refresh_token, ... }
-}
-
-async function getAccessTokenFromRefresh({ refreshToken, clientId, clientSecret }) {
-  const r = await fetch("https://api.amazon.com/auth/o2/token", {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      grant_type: "refresh_token",
-      refresh_token: refreshToken,
-      client_id: clientId,
-      client_secret: clientSecret,
-    }),
-  });
-  if (!r.ok) throw new Error(`LWA refresh failed: ${r.status} ${await r.text()}`);
-  return r.json(); // { access_token, expires_in, token_type }
-}
-
-/* ---- SP-API connect ---- */
-app.get("/connect/spapi/start", (req, res) => {
-  const scope = "sellingpartnerapi::migration";
-  const redirectUri = `${process.env.API_BASE_URL}/connect/spapi/callback`;
-  const url = buildLwaAuthUrl({
-    clientId: process.env.LWA_CLIENT_ID,
-    redirectUri,
-    scope,
-  });
-  res.redirect(url);
-});
-
-app.get("/connect/spapi/callback", async (req, res) => {
-  try {
-    const { code, error, error_description } = req.query;
-    if (error) return res.status(400).send(`LWA error: ${error} - ${error_description || ""}`);
-    if (!code) return res.status(400).send("Missing code");
-
-    const redirectUri = `${process.env.API_BASE_URL}/connect/spapi/callback`;
-    const tokens = await exchangeAuthCodeForTokens({
-      code,
-      clientId: process.env.LWA_CLIENT_ID,
-      clientSecret: process.env.LWA_CLIENT_SECRET,
-      redirectUri,
-    });
-
-    TOKENS.spapi = {
-      refresh_token: tokens.refresh_token,
-      region: process.env.SPAPI_REGION || "eu", // eu | na | fe
-      saved_at: new Date().toISOString(),
+    // OpenAI-compatible chat
+    const payload = {
+      model: OPENAI_MODEL,
+      messages: [
+        ...(system ? [{ role: 'system', content: system }] : []),
+        { role: 'user', content: userText }
+      ]
     };
 
-    res.send("✅ SP-API refresh token saved (in memory). Replace with DB storage later.");
-  } catch (e) {
-    console.error(e);
-    res.status(500).send(`SP-API connect failed: ${e.message}`);
-  }
-});
-
-/* ---- Amazon Ads connect ---- */
-app.get("/connect/ads/start", (req, res) => {
-  const scope = "advertising::campaign_management";
-  const redirectUri = `${process.env.API_BASE_URL}/connect/ads/callback`;
-  const url = buildLwaAuthUrl({
-    clientId: process.env.ADS_LWA_CLIENT_ID,
-    redirectUri,
-    scope,
-  });
-  res.redirect(url);
-});
-
-app.get("/connect/ads/callback", async (req, res) => {
-  try {
-    const { code, error, error_description } = req.query;
-    if (error) return res.status(400).send(`LWA error: ${error} - ${error_description || ""}`);
-    if (!code) return res.status(400).send("Missing code");
-
-    const redirectUri = `${process.env.API_BASE_URL}/connect/ads/callback`;
-    const tokens = await exchangeAuthCodeForTokens({
-      code,
-      clientId: process.env.ADS_LWA_CLIENT_ID,
-      clientSecret: process.env.ADS_LWA_CLIENT_SECRET,
-      redirectUri,
-    });
-
-    const defaultAdsBase = "https://advertising-api-eu.amazon.com";
-    TOKENS.ads = {
-      refresh_token: tokens.refresh_token,
-      api_base: process.env.ADS_API_BASE || defaultAdsBase,
-      saved_at: new Date().toISOString(),
-    };
-
-    res.send("✅ Ads refresh token saved (in memory). Replace with DB storage later.");
-  } catch (e) {
-    console.error(e);
-    res.status(500).send(`Ads connect failed: ${e.message}`);
-  }
-});
-
-/* ---- Test: Ads profiles ---- */
-app.get("/ads/profiles", async (_req, res) => {
-  try {
-    if (!TOKENS.ads?.refresh_token) {
-      return res
-        .status(400)
-        .json({ error: "No Ads refresh token stored yet. Connect first at /connect/ads/start" });
-    }
-
-    const { access_token } = await getAccessTokenFromRefresh({
-      refreshToken: TOKENS.ads.refresh_token,
-      clientId: process.env.ADS_LWA_CLIENT_ID,
-      clientSecret: process.env.ADS_LWA_CLIENT_SECRET,
-    });
-
-    const base = TOKENS.ads.api_base || "https://advertising-api-eu.amazon.com";
-    const r = await fetch(`${base}/v2/profiles`, {
+    const r = await fetch(`${OPENAI_BASE_URL}/chat/completions`, {
+      method: 'POST',
       headers: {
-        Authorization: `Bearer ${access_token}`,
-        "Content-Type": "application/json",
-        "Amazon-Advertising-API-ClientId": process.env.ADS_LWA_CLIENT_ID,
+        'Authorization': `Bearer ${OPENAI_API_KEY}`,
+        'Content-Type': 'application/json'
       },
+      body: JSON.stringify(payload)
     });
 
     if (!r.ok) {
-      const body = await r.text();
-      throw new Error(`Ads API error ${r.status}: ${body}`);
+      const text = await r.text();
+      return res.status(502).json({ ok: false, error: 'Upstream error', detail: text });
     }
 
-    const profiles = await r.json();
-    res.json({ ok: true, profiles });
+    const data = await r.json();
+    const reply = data?.choices?.[0]?.message?.content || '(no reply)';
+    res.json({ ok: true, provider: 'openai-compatible', model: OPENAI_MODEL, reply });
+
   } catch (e) {
     console.error(e);
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ ok: false, error: e?.message || 'Server error' });
   }
 });
 
-/* -------------------- Start server -------------------- */
-const port = process.env.PORT || 3000; // Render injects PORT in production
-app.listen(port, () => console.log(`✅ KavPlus backend running on ${port}`));
+// ---------- Amazon Connect placeholders ----------
+
+// SP-API: redirect user to Amazon LWA
+app.get('/api/connect/spapi', (req, res) => {
+  if (!LWA_CLIENT_ID) {
+    return res.status(501).json({
+      ok: false,
+      error: 'LWA_CLIENT_ID not set. Add it on Render → Environment.',
+      hint: 'Once set, this endpoint will redirect to Amazon for authorization.'
+    });
+  }
+  // Most dev flows use “profile”/“offline_access” scopes while you test;
+  // you will replace scopes with the ones Amazon approves for your app.
+  const scopes = encodeURIComponent('profile offline_access');
+
+  const url = `https://www.amazon.com/ap/oa?` +
+    `client_id=${encodeURIComponent(LWA_CLIENT_ID)}` +
+    `&scope=${scopes}` +
+    `&response_type=code` +
+    `&redirect_uri=${encodeURIComponent(LWA_REDIRECT_SPAPI)}`;
+
+  res.redirect(url);
+});
+
+// SP-API OAuth callback (just shows the code so you can confirm it’s working)
+app.get('/api/connect/spapi/callback', (req, res) => {
+  const { code, state, error, error_description } = req.query;
+  res.send(`
+    <h2>SP-API Callback</h2>
+    <pre>${JSON.stringify({ code, state, error, error_description }, null, 2)}</pre>
+    <p>Store the code server-side and exchange for tokens next.</p>
+  `);
+});
+
+// Ads (placeholder — same pattern)
+app.get('/api/connect/ads', (req, res) => {
+  if (!LWA_CLIENT_ID) {
+    return res.status(501).json({ ok: false, error: 'LWA_CLIENT_ID not set' });
+  }
+  const scopes = encodeURIComponent('profile offline_access');
+  const url = `https://www.amazon.com/ap/oa?client_id=${encodeURIComponent(LWA_CLIENT_ID)}&scope=${scopes}&response_type=code&redirect_uri=${encodeURIComponent(LWA_REDIRECT_ADS)}`;
+  res.redirect(url);
+});
+
+app.get('/api/connect/ads/callback', (req, res) => {
+  const { code, state, error, error_description } = req.query;
+  res.send(`
+    <h2>Ads Callback</h2>
+    <pre>${JSON.stringify({ code, state, error, error_description }, null, 2)}</pre>
+  `);
+});
+
+// JSON 404 for /api/* so the dashboard never receives HTML
+app.use('/api', (req, res) => {
+  res.status(404).json({ ok: false, error: 'Not found', path: req.path });
+});
+
+// Home
+app.get('/', (req, res) => {
+  res.send('KavPlus Backend Running ✅');
+});
+
+// ---------- Start ----------
+app.listen(PORT, () => {
+  console.log(`KavPlus backend running on ${PORT}`);
+});
