@@ -1,0 +1,24 @@
+[
+  {
+    "key": "kavplus",
+    "label": "KAV PLUS",
+    "spapi": {
+      "refresh_token": null,
+      "region": "eu"
+    },
+    "ads": {
+      "refresh_token": null
+    }
+  },
+  {
+    "key": "jk",
+    "label": "J&K",
+    "spapi": {
+      "refresh_token": null,
+      "region": "eu"
+    },
+    "ads": {
+      "refresh_token": null
+    }
+  }
+]
