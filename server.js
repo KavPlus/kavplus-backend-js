@@ -35,20 +35,22 @@ app.get("/api/connect/spapi/:store", async (req, res) => {
   const store = await getStore(storeKey);
   if (!store) return res.status(404).send("Unknown store");
 
-  const clientId = process.env.LWA_CLIENT_ID;
   const redirectUri = `${process.env.API_BASE_URL}/api/callback/spapi`;
-  const scope = encodeURIComponent("sellingpartnerapi::migration"); // <-- fixed
   const state = encodeURIComponent(JSON.stringify({ t: "spapi", store: storeKey }));
 
+  const base = process.env.SELLER_CENTRAL_BASE || "https://sellercentral.amazon.co.uk";
+  const appId = process.env.SPAPI_APP_ID; // <— the value you sent
+  if (!appId) return res.status(500).send("Missing SPAPI_APP_ID env");
+
   const authUrl =
-    `https://www.amazon.com/ap/oa?client_id=${clientId}` +
-    `&scope=${scope}%20offline_access` +
-    `&response_type=code` +
-    `&redirect_uri=${encodeURIComponent(redirectUri)}` +
-    `&state=${state}`;
+    `${base}/apps/authorize/consent` +
+    `?application_id=${encodeURIComponent(appId)}` +
+    `&state=${state}` +
+    `&redirect_uri=${encodeURIComponent(redirectUri)}`;
 
   res.redirect(authUrl);
 });
+
 
 app.get("/api/callback/spapi", async (req, res) => {
   try {
