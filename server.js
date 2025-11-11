@@ -1,10 +1,6 @@
 import express from "express";
 import fetch from "node-fetch";
-import {
-  getStores,
-  getStore,
-  setSpapiRefreshToken
-} from "./storeRepo.js";
+import { getStores, getStore, setSpapiRefreshToken } from "./storeRepo.js";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -28,7 +24,7 @@ app.get("/api/status", async (req, res) => {
       key: s.key,
       label: s.label,
       spapiConnected: !!(s.spapi && s.spapi.refresh_token),
-      adsConnected: !!(s.ads && s.ads.refresh_token),
+      adsConnected: !!(s.ads && s.ads.refresh_token)
     })),
     timestamp: new Date().toISOString()
   });
@@ -41,7 +37,7 @@ app.get("/api/connect/spapi/:store", async (req, res) => {
 
   const clientId = process.env.LWA_CLIENT_ID;
   const redirectUri = `${process.env.API_BASE_URL}/api/callback/spapi`;
-  const scope = encodeURIComponent("profile");
+  const scope = encodeURIComponent("sellingpartnerapi::migration"); // <-- fixed
   const state = encodeURIComponent(JSON.stringify({ t: "spapi", store: storeKey }));
 
   const authUrl =
