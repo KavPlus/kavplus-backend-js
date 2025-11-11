@@ -11,7 +11,7 @@ const PORT = process.env.PORT || 3000;
 
 app.get("/", (req, res) => res.send("KavPlus Backend Running 🚀"));
 app.get("/health", (req, res) =>
-  res.json({ status: "ok", uptime: process.uptime(), time: new Date().toISOString() })
+  res.json({ status: "ok", uptime: process.uptime(), ts: new Date().toISOString() })
 );
 
 // --- Multi-store routes ---
