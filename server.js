@@ -1,112 +1,151 @@
-// server.js
-import express from 'express';
-import cors from 'cors';
-import dotenv from 'dotenv';
-import fetch from 'node-fetch';
+// server.js - Kav+ backend API (demo version)
+// Make sure you have express installed in package.json:
+// "dependencies": { "express": "^4.18.2", "cors": "^2.8.5" }
 
-dotenv.config();
+const express = require("express");
+const cors = require("cors");
 
 const app = express();
-app.use(cors());
+
+// ====== CONFIG ======
+const PORT = process.env.PORT || 10000;
+
+// Used by frontend and health endpoint
+const API_VERSION = "0.1-demo";
+
+// ====== MIDDLEWARE ======
 app.use(express.json());
 
-const API_BASE = process.env.API_BASE_URL || 'http://localhost:3000';
-const APP_BASE = process.env.APP_BASE_URL || 'http://localhost:8080';
+// Allow CORS from your sites
+const allowedOrigins = [
+  "https://kavplus.uk",
+  "https://www.kavplus.uk",
+  "https://app.kavplus.uk",
+];
 
-// --- LWA client creds
-const LWA_CLIENT_ID = process.env.LWA_CLIENT_ID || '';
-const LWA_CLIENT_SECRET = process.env.LWA_CLIENT_SECRET || '';
+app.use(
+  cors({
+    origin: function (origin, callback) {
+      // Allow tools like Postman with no origin
+      if (!origin) return callback(null, true);
+      if (allowedOrigins.includes(origin)) return callback(null, true);
+      return callback(new Error("Not allowed by CORS"));
+    },
+  })
+);
 
-// --- stores meta (kavplus:KAV PLUS|jk:J&K)
-const STORE_LIST = (process.env.STORE_LIST || '').split('|').filter(Boolean).map(pair => {
-  const [id, name] = pair.split(':');
-  return { id, name };
+// Simple logger
+app.use((req, _res, next) => {
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`);
+  next();
 });
 
-// helper: read refresh token env by convention REFRESH_TOKEN_<storeId>
-const getRefreshToken = (storeId) => process.env[`REFRESH_TOKEN_${storeId}`];
+// ====== ROUTES ======
 
-// helper: exchange refresh token for access token (LWA)
-async function getAccessToken(storeId) {
-  const refresh_token = getRefreshToken(storeId);
-  if (!refresh_token) {
-    throw new Error(`Missing refresh token for store "${storeId}". Add REFRESH_TOKEN_${storeId} in Render env.`);
-  }
-  if (!LWA_CLIENT_ID || !LWA_CLIENT_SECRET) {
-    throw new Error('Missing LWA_CLIENT_ID or LWA_CLIENT_SECRET.');
-  }
-
-  const res = await fetch('https://api.amazon.com/auth/o2/token', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
-    body: new URLSearchParams({
-      grant_type: 'refresh_token',
-      refresh_token,
-      client_id: LWA_CLIENT_ID,
-      client_secret: LWA_CLIENT_SECRET
-    })
+// Health / status endpoint
+app.get("/health", (req, res) => {
+  res.json({
+    ok: true,
+    service: "kavplus-backend-js",
+    version: API_VERSION,
+    time: new Date().toISOString(),
+    env: {
+      hasOpenAI: !!process.env.OPENAI_API_KEY,
+      hasGemini: !!process.env.GEMINI_API_KEY,
+      hasAnthropic: !!process.env.ANTHROPIC_API_KEY,
+      hasAIMLAPI: !!process.env.AIMLAPI_API_KEY,
+    },
   });
+});
 
-  const data = await res.json();
-  if (!res.ok) {
-    throw new Error(`LWA token error: ${res.status} ${JSON.stringify(data)}`);
+// Amazon connection endpoints
+// For now, we just redirect to URLs you set in environment variables
+
+app.get("/connect/spapi", (req, res) => {
+  const store = (req.query.store || "kav_plus").toLowerCase();
+  let url;
+
+  if (store === "jk_store" || store === "j&k" || store === "j_k") {
+    url = process.env.CONNECT_SPAPI_URL_JK;
+  } else {
+    url = process.env.CONNECT_SPAPI_URL_KAVPLUS;
   }
-  // Example: { access_token, token_type:'bearer', expires_in:3600 }
-  return data;
-}
 
-// ----- BASIC ROUTES
-app.get('/', (_req, res) => {
-  res.send('KavPlus Backend Running ✅');
+  if (!url) {
+    return res.status(500).json({
+      ok: false,
+      message:
+        "CONNECT_SPAPI_URL_KAVPLUS / CONNECT_SPAPI_URL_JK not set on server.",
+    });
+  }
+
+  return res.redirect(url);
 });
 
-app.get('/health', (_req, res) => {
-  res.json({ status: 'ok', uptime: process.uptime(), ts: new Date().toISOString() });
+app.get("/connect/ads", (req, res) => {
+  const store = (req.query.store || "kav_plus").toLowerCase();
+  let url;
+
+  if (store === "jk_store" || store === "j&k" || store === "j_k") {
+    url = process.env.CONNECT_ADS_URL_JK;
+  } else {
+    url = process.env.CONNECT_ADS_URL_KAVPLUS;
+  }
+
+  if (!url) {
+    return res.status(500).json({
+      ok: false,
+      message:
+        "CONNECT_ADS_URL_KAVPLUS / CONNECT_ADS_URL_JK not set on server.",
+    });
+  }
+
+  return res.redirect(url);
 });
 
-// ----- STORE MANAGEMENT
-// Return list of stores & whether each has a refresh token loaded
-app.get('/api/stores', (_req, res) => {
-  const stores = STORE_LIST.map(s => ({
-    id: s.id,
-    name: s.name,
-    connected: !!getRefreshToken(s.id)
-  }));
-  res.json({ ok: true, stores });
-});
+// ChatKAV+ demo endpoint
+// Later we can upgrade this to real OpenAI / Gemini calls.
 
-// Get an access token for a given store (for testing)
-app.get('/api/token', async (req, res) => {
+app.post("/chat", async (req, res) => {
   try {
-    const store = (req.query.store || STORE_LIST[0]?.id || '').trim();
-    if (!store) return res.status(400).json({ ok: false, error: 'No store supplied' });
-    const tok = await getAccessToken(store);
-    res.json({ ok: true, store, token_type: tok.token_type, expires_in: tok.expires_in });
+    const { message, provider = "auto", store = "kav_plus" } = req.body || {};
+
+    if (!message || typeof message !== "string") {
+      return res.status(400).json({
+        ok: false,
+        error: "Missing 'message' in body",
+      });
+    }
+
+    // DEMO BEHAVIOUR:
+    // Just echo back with some context so you know everything is wired correctly.
+    const reply =
+      "Demo ChatKAV+ reply: I received your message and the backend is working.\n\n" +
+      `• Message: "${message}"\n` +
+      `• Requested provider: ${provider}\n` +
+      `• Active store: ${store}\n\n` +
+      "In the next step, we can plug this into real AI providers (OpenAI, Gemini, etc.) using your API keys.";
+
+    return res.json({
+      ok: true,
+      reply,
+      provider: provider === "auto" ? "demo-auto" : provider,
+    });
   } catch (err) {
-    res.status(500).json({ ok: false, error: String(err.message || err) });
+    console.error("Chat error:", err);
+    return res.status(500).json({
+      ok: false,
+      error: "Internal server error",
+    });
   }
 });
 
-// Placeholder "connect" pages so you don’t see 404s if clicked
-app.get('/connect/spapi', (_req, res) => {
-  // Private developer doesn’t use OAuth UI; show info page instead.
-  res.send('<h3>Private Developer</h3><p>Refresh tokens are managed in Render env. No interactive connect needed.</p>');
-});
-app.get('/connect/ads', (_req, res) => {
-  res.send('<h3>Ads Connect</h3><p>Coming later. For now, add refresh tokens in env variables.</p>');
+// Root (optional)
+app.get("/", (_req, res) => {
+  res.send("Kav+ backend is running. See /health for status.");
 });
 
-// Example protected test endpoint: just proves the access token is mintable
-app.get('/api/ping-spapi', async (req, res) => {
-  try {
-    const store = (req.query.store || STORE_LIST[0]?.id || '').trim();
-    if (!store) return res.status(400).json({ ok: false, error: 'No store supplied' });
-    const tok = await getAccessToken(store);
-    res.json({ ok: true, store, got_access_token: !!tok.access_token, expires_in: tok.expires_in });
-  } catch (err) {
-    res.status(500).json({ ok: false, error: String(err.message || err) });
-  }
+// ====== START SERVER ======
+app.listen(PORT, () => {
+  console.log(`Kav+ backend listening on port ${PORT}`);
 });
-
-const port = process.env.PORT || 3000;
-app.listen(port, () => console.log(`🚀 Server running on port ${port}`));
