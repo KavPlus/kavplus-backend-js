@@ -2,11 +2,13 @@
   {
     "id": "kavplus",
     "name": "KAV PLUS",
-    "sellerCentralBase": "https://sellercentral.amazon.co.uk"
+    "sellerCentralBase": "https://sellercentral.amazon.co.uk",
+    "refreshToken": "PASTE_KAVPLUS_REFRESH_TOKEN_HERE"
   },
   {
     "id": "jk",
     "name": "J&K STORE",
-    "sellerCentralBase": "https://sellercentral.amazon.co.uk"
+    "sellerCentralBase": "https://sellercentral.amazon.co.uk",
+    "refreshToken": "PASTE_JK_REFRESH_TOKEN_HERE"
   }
 ]
