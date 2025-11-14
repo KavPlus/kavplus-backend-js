@@ -1,26 +1,26 @@
 // storeRepo.js
-import stores from "./stores.json" assert { type: "json" };
+// Helper for reading stores.json and exposing helper functions.
 
-// Return list of stores *without* secrets
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const storesPath = path.join(__dirname, "stores.json");
+const stores = JSON.parse(fs.readFileSync(storesPath, "utf8"));
+
 export function listStores() {
-  return stores.map(({ id, name }) => ({ id, name }));
+  // Only share safe info to the frontend (no tokens)
+  return stores.map((s) => ({
+    key: s.id,
+    label: s.name,
+  }));
 }
 
-// Get a store + its refresh token from env
-export function getStoreWithToken(storeId) {
-  const store = stores.find((s) => s.id === storeId);
-  if (!store) return null;
-
-  // Env var pattern: SPAPI_REFRESH_TOKEN_<UPPERCASE_ID>
-  const envKey = `SPAPI_REFRESH_TOKEN_${storeId.toUpperCase()}`;
-  const refreshToken = process.env[envKey];
-
-  if (!refreshToken) {
-    return null;
-  }
-
-  return {
-    ...store,
-    refreshToken,
-  };
+export function getStoreWithToken(id) {
+  if (!id) return null;
+  const key = id.toLowerCase();
+  return stores.find((s) => s.id.toLowerCase() === key) || null;
 }
