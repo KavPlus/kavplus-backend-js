@@ -1,151 +1,86 @@
-// server.js - Kav+ backend API (demo version)
-// Make sure you have express installed in package.json:
-// "dependencies": { "express": "^4.18.2", "cors": "^2.8.5" }
+// server.js
+import express from "express";
+import cors from "cors";
+import dotenv from "dotenv";
+import { listStores, getStoreWithToken } from "./storeRepo.js";
 
-const express = require("express");
-const cors = require("cors");
+dotenv.config();
 
 const app = express();
-
-// ====== CONFIG ======
-const PORT = process.env.PORT || 10000;
-
-// Used by frontend and health endpoint
-const API_VERSION = "0.1-demo";
-
-// ====== MIDDLEWARE ======
+app.use(cors());
 app.use(express.json());
 
-// Allow CORS from your sites
-const allowedOrigins = [
-  "https://kavplus.uk",
-  "https://www.kavplus.uk",
-  "https://app.kavplus.uk",
-];
-
-app.use(
-  cors({
-    origin: function (origin, callback) {
-      // Allow tools like Postman with no origin
-      if (!origin) return callback(null, true);
-      if (allowedOrigins.includes(origin)) return callback(null, true);
-      return callback(new Error("Not allowed by CORS"));
-    },
-  })
-);
-
-// Simple logger
-app.use((req, _res, next) => {
-  console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`);
-  next();
-});
-
-// ====== ROUTES ======
-
-// Health / status endpoint
+// --- health -------------------------------------------------
 app.get("/health", (req, res) => {
   res.json({
-    ok: true,
-    service: "kavplus-backend-js",
-    version: API_VERSION,
-    time: new Date().toISOString(),
-    env: {
-      hasOpenAI: !!process.env.OPENAI_API_KEY,
-      hasGemini: !!process.env.GEMINI_API_KEY,
-      hasAnthropic: !!process.env.ANTHROPIC_API_KEY,
-      hasAIMLAPI: !!process.env.AIMLAPI_API_KEY,
-    },
+    status: "ok",
+    uptime: process.uptime(),
+    ts: new Date().toISOString(),
   });
 });
 
-// Amazon connection endpoints
-// For now, we just redirect to URLs you set in environment variables
-
-app.get("/connect/spapi", (req, res) => {
-  const store = (req.query.store || "kav_plus").toLowerCase();
-  let url;
-
-  if (store === "jk_store" || store === "j&k" || store === "j_k") {
-    url = process.env.CONNECT_SPAPI_URL_JK;
-  } else {
-    url = process.env.CONNECT_SPAPI_URL_KAVPLUS;
-  }
-
-  if (!url) {
-    return res.status(500).json({
-      ok: false,
-      message:
-        "CONNECT_SPAPI_URL_KAVPLUS / CONNECT_SPAPI_URL_JK not set on server.",
-    });
-  }
-
-  return res.redirect(url);
+// --- list stores (for dropdown in dashboard) ----------------
+app.get("/api/stores", (req, res) => {
+  const stores = listStores();
+  res.json({ stores });
 });
 
-app.get("/connect/ads", (req, res) => {
-  const store = (req.query.store || "kav_plus").toLowerCase();
-  let url;
-
-  if (store === "jk_store" || store === "j&k" || store === "j_k") {
-    url = process.env.CONNECT_ADS_URL_JK;
-  } else {
-    url = process.env.CONNECT_ADS_URL_KAVPLUS;
-  }
-
-  if (!url) {
-    return res.status(500).json({
-      ok: false,
-      message:
-        "CONNECT_ADS_URL_KAVPLUS / CONNECT_ADS_URL_JK not set on server.",
-    });
-  }
-
-  return res.redirect(url);
-});
-
-// ChatKAV+ demo endpoint
-// Later we can upgrade this to real OpenAI / Gemini calls.
-
-app.post("/chat", async (req, res) => {
+// --- exchange refresh token -> access token for SP-API ------
+app.get("/api/token/exchange", async (req, res) => {
   try {
-    const { message, provider = "auto", store = "kav_plus" } = req.body || {};
+    const storeId = (req.query.store || "").toLowerCase();
 
-    if (!message || typeof message !== "string") {
+    const store = getStoreWithToken(storeId);
+    if (!store) {
       return res.status(400).json({
-        ok: false,
-        error: "Missing 'message' in body",
+        error: "unknown_store_or_missing_token",
+        message: `No refresh token configured for store '${storeId}'.`,
       });
     }
 
-    // DEMO BEHAVIOUR:
-    // Just echo back with some context so you know everything is wired correctly.
-    const reply =
-      "Demo ChatKAV+ reply: I received your message and the backend is working.\n\n" +
-      `• Message: "${message}"\n` +
-      `• Requested provider: ${provider}\n` +
-      `• Active store: ${store}\n\n` +
-      "In the next step, we can plug this into real AI providers (OpenAI, Gemini, etc.) using your API keys.";
+    const body = new URLSearchParams({
+      grant_type: "refresh_token",
+      refresh_token: store.refreshToken,
+      client_id: process.env.LWA_CLIENT_ID,
+      client_secret: process.env.LWA_CLIENT_SECRET,
+    });
 
-    return res.json({
-      ok: true,
-      reply,
-      provider: provider === "auto" ? "demo-auto" : provider,
+    const response = await fetch("https://api.amazon.com/auth/o2/token", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body,
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      console.error("Token exchange failed:", data);
+      return res.status(500).json({
+        error: "exchange_failed",
+        details: data,
+      });
+    }
+
+    res.json({
+      store: store.id,
+      access_token: data.access_token,
+      token_type: data.token_type,
+      expires_in: data.expires_in,
+      issued_at: new Date().toISOString(),
     });
   } catch (err) {
-    console.error("Chat error:", err);
-    return res.status(500).json({
-      ok: false,
-      error: "Internal server error",
+    console.error("Unexpected error in /api/token/exchange:", err);
+    res.status(500).json({
+      error: "server_error",
+      message: "Unexpected error while exchanging token.",
     });
   }
 });
 
-// Root (optional)
-app.get("/", (_req, res) => {
-  res.send("Kav+ backend is running. See /health for status.");
-});
-
-// ====== START SERVER ======
-app.listen(PORT, () => {
-  console.log(`Kav+ backend listening on port ${PORT}`);
+// --- start server -------------------------------------------
+const port = process.env.PORT || 3000;
+app.listen(port, () => {
+  console.log(`KavPlus backend running on ${port}`);
 });
