@@ -7,13 +7,11 @@
     "node": ">=18"
   },
   "scripts": {
-    "start": "node server.js",
-    "build": "echo \"no build step\"",
-    "render-build": "echo \"no build step\""
+    "start": "node server.js"
   },
   "dependencies": {
+    "express": "^4.19.2",
     "cors": "^2.8.5",
-    "dotenv": "^16.4.1",
-    "express": "^4.19.2"
+    "node-fetch": "^3.3.2"
   }
 }
