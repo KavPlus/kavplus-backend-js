@@ -1,24 +1,12 @@
 [
   {
-    "key": "kavplus",
-    "label": "KAV PLUS",
-    "spapi": {
-      "refresh_token": null,
-      "region": "eu"
-    },
-    "ads": {
-      "refresh_token": null
-    }
+    "id": "kavplus",
+    "name": "KAV PLUS",
+    "sellerCentralBase": "https://sellercentral.amazon.co.uk"
   },
   {
-    "key": "jk",
-    "label": "J&K",
-    "spapi": {
-      "refresh_token": null,
-      "region": "eu"
-    },
-    "ads": {
-      "refresh_token": null
-    }
+    "id": "jk",
+    "name": "J&K STORE",
+    "sellerCentralBase": "https://sellercentral.amazon.co.uk"
   }
 ]
